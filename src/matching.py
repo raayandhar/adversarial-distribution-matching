@@ -16,6 +16,7 @@ config = {
     'adv_init': '! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !',
     'temperature': 1.0, # not needed?
     'device': 'cuda:0',
+    'num_steps': 250,
 }
 
 
@@ -45,7 +46,7 @@ student_logits, student_text = generate_and_get_logits(student_message)
 """
 Taken from https://github.com/jongwooko/distillm (DistiLLM: ICML 2024)
 They propose some better options as well. We can just start with forward_kl for simplicity.
-"""
+
 def forward_kl(student_logits, teacher_logits, no_model_batch):
     teacher_probs = F.softmax(teacher_logits, dim=-1, dtype=torch.float32)
     inf_mask = torch.isinf(logits)
@@ -55,7 +56,14 @@ def forward_kl(student_logits, teacher_logits, no_model_batch):
     mask = (no_model_batch["label"] != -100).int()
     distil_loss = -torch.sum(x * mask.view(-1), dim=0) / torch.sum(mask.view(-1), dim=0)
     return distil_loss
+"""
 
+# not even sure what no_model_batch is, let's use a simpler one?
+def forward_kl(student_logits, teacher_logits):
+    teacher_probs = F.softmax(teacher_logits, dim=-1, dtype=torch.float32)
+    student_logprobs = F.log_softmax(student_logits, dim=-1, dtype=torch.float32)
+    kl_div = F.kl_div(student_logprobs, teacher_probs, reduction='batchmean', log_target=False)
+    return kl_div
 
 class DistributionMatcher:
     def __init__(self,
@@ -80,6 +88,7 @@ class DistributionMatcher:
             teacher_data: Dict
             student_data: Dict
     ):
+        config = self.config
         teacher_message = form_llm_input(teacher_data)
         student_message = form_llm_input(student_data)
 
@@ -93,4 +102,40 @@ class DistributionMatcher:
         before_embeds = [embedding_layer(ids) for ids in before_ids]
         after_embeds = [embedding_layer(ids) for ids in after_ids]
 
-        
+        # we need some function to get the token gradient based on the kl div signal...?
+        # or collect some candidate optim_str sequences to
+        #div_loss = forward_kl(student_logits, teacher_logits)
+        losses = []
+        optim_strings = []
+        student_texts = []
+
+        optim_str = config['adv_init']
+        student_inst = student_data['instruction']
+        for i in tqdm(range(config["num_steps"])):
+
+            student_input = before_str + optim_str + after_str
+            student_data = {'instruction': student_inst, 'input': student_input}
+            student_message = form_llm_input(student_data)
+            student_logits, student_text = generate_and_get_logits(student_message)
+            student_texts.append(student_text)
+
+            loss = forward_kl(student_logits, teacher_logits)
+            losses.append(loss)
+
+            """
+            This is the point where we compute some way to update or generate a candidate optim_str.
+            One option is just to look through all possible token replacements, reconstruct the input,
+            then compute the forward_kl loss for each. Pick the token with the minimum loss, and then
+            continue. But this seems very dumb. How can we leverage information from 1) the loss signal,
+            2) the distribution itself (?). I.e., they do training on the parameters for knowledge
+            distillation, how can we do something similar (but update the optim_str instead?)
+            """
+
+            # we need a method to compute the/a token gradient
+
+    def compute_kl_token_gradients(self,
+                                   div_loss,
+        ):
+        #
+        # some sort of implementation here?
+        pass
